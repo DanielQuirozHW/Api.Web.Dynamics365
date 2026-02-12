@@ -1,0 +1,71 @@
+#######################################
+# 🔐 Sensitive files / Secrets
+#######################################
+
+# Service account keys
+serviceMegaAccountKey.json
+*service*account*.json
+*.key.json
+
+# App settings with secrets
+appsettings.Development.json
+appsettings.Local.json
+
+# Never commit real secrets
+secrets.json
+*.secret
+*.env
+.env
+.env.*
+
+# Azure publish / credentials
+*.publishsettings
+*.azurePubxml
+
+# Logs
+*.log
+
+# Certificates
+*.pfx
+*.pem
+*.cer
+
+
+#######################################
+# 🛠 .NET / Visual Studio
+#######################################
+
+# Build folders
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# VS Code
+.vscode/
+
+# NuGet
+*.nupkg
+packages/
+.nuget/
+
+# Test results
+TestResults/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# App settings (contains secrets)
+appsettings.json
+appsettings.Development.json
+appsettings.Local.json
+Clases/Excepciones.cs
