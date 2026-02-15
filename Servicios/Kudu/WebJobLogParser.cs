@@ -9,32 +9,58 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
 {
     public static class WebJobLogParser
     {
-        // Ej: [01/25/2026 03:08:06 > 79fc8c: SYS INFO] Status changed to Success
         private static readonly Regex HeaderRegex = new(
             @"^\[(?<ts>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) > (?<run>[0-9a-fA-F]+): (?<lvl>[A-Z ]+)\] (?<msg>.*)$",
             RegexOptions.Compiled);
 
-        // Estos son los mensajes “no va / idle / reinicio” que NO querés devolver
+        private const string KUDU_TRUNC_MARKER = "Reached maximum allowed output lines";
+
         private static readonly string[] NoisePhrases =
         {
-            "Sin Mensajes en Cola",                 // “no encontró nada”
-            "Run script 'run.cmd'",                 // arranque
-            "Status changed to Running",            // sys
-            "Status changed to Success",            // sys
-            "Status changed to PendingRestart",     // sys
-            "Process went down",                    // sys
-            "waiting for 60 seconds"                // sys
+            "Sin Mensajes en Cola",
+            "Run script 'run.cmd'",
+            "Status changed to Running",
+            "Status changed to Success",
+            "Status changed to PendingRestart",
+            "Process went down",
+            "waiting for 60 seconds"
         };
 
-        public static List<WebJobLogEntry> Parse(string sanitizedLogText)
+        private static readonly string[] CycleBoundaryPhrases =
         {
-            var lines = (sanitizedLogText ?? "")
+            "Run script 'run.cmd'",
+            "Status changed to Running",
+            "Status changed to PendingRestart",
+            "Process went down",
+            "waiting for 60 seconds"
+        };
+
+        private static readonly Regex SensitiveLineRegex = new(
+            @"(^|\b)OAuth\s*:|" +
+            @"AuthType\s*=\s*ClientSecret|" +
+            @"ClientSecret\s*=|" +
+            @"ClientId\s*=|" +
+            @"LoginPrompt\s*=|" +
+            @"authority\s*=|" +
+            @"resource\s*=|" +
+            @"tenant\s*=|" +
+            @"\burl\s*=\s*https?://|" +
+            @"Password\s*=|" +
+            @"SharedAccessKey\s*=|" +
+            @"AccountKey\s*=|" +
+            @"Authorization:\s*Bearer\s+",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        public static List<WebJobLogEntry> Parse(string rawLogText)
+        {
+            var lines = (rawLogText ?? "")
                 .Replace("\r\n", "\n")
                 .Replace("\r", "\n")
                 .Split('\n');
 
             var result = new List<WebJobLogEntry>(lines.Length);
             WebJobLogEntry? current = null;
+            var idx = 0;
 
             foreach (var rawLine in lines)
             {
@@ -57,11 +83,13 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
 
                     current = new WebJobLogEntry
                     {
+                        Index = idx++,
                         Timestamp = ts,
                         RunId = m.Groups["run"].Value,
                         Level = (m.Groups["lvl"].Value ?? "UNKNOWN").Trim(),
                         Message = m.Groups["msg"].Value ?? "",
-                        Raw = line
+                        Raw = line,
+                        IsCurrentExecution = false
                     };
                 }
                 else
@@ -70,11 +98,13 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                     {
                         current = new WebJobLogEntry
                         {
+                            Index = idx++,
                             Timestamp = null,
                             RunId = null,
                             Level = "UNKNOWN",
                             Message = line,
-                            Raw = line
+                            Raw = line,
+                            IsCurrentExecution = false
                         };
                     }
                     else
@@ -89,10 +119,6 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             return result;
         }
 
-        /// <summary>
-        /// “Ejecución actual” para continuous, usando el último RunId encontrado en el log.
-        /// Si no hay RunId (formato inesperado), devuelve todo.
-        /// </summary>
         public static List<WebJobLogEntry> KeepOnlyLastRun(List<WebJobLogEntry> entries)
         {
             if (entries == null || entries.Count == 0) return new List<WebJobLogEntry>();
@@ -106,19 +132,10 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                 .ToList();
         }
 
-        public static bool DetectTruncatedByKudu(string sanitizedText)
+        public static bool DetectTruncatedByKudu(string rawText)
         {
-            return (sanitizedText ?? "")
-                .IndexOf("Reached maximum allowed output lines", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        public static List<WebJobLogEntry> TakeLast(List<WebJobLogEntry> entries, int max)
-        {
-            if (entries == null || entries.Count == 0) return new List<WebJobLogEntry>();
-            if (max <= 0) return new List<WebJobLogEntry>();
-            if (entries.Count <= max) return entries;
-
-            return entries.Skip(entries.Count - max).ToList();
+            return (rawText ?? "")
+                .IndexOf(KUDU_TRUNC_MARKER, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static bool ContainsAny(string? text, IEnumerable<string> phrases)
@@ -131,10 +148,27 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             }
             return false;
         }
+        private static bool IsKuduTruncationMarker(WebJobLogEntry e)
+        {
+            return !string.IsNullOrWhiteSpace(e.Message) &&
+                   e.Message.IndexOf(KUDU_TRUNC_MARKER, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsSensitive(WebJobLogEntry e)
+        {
+            if (string.IsNullOrWhiteSpace(e.Message)) return false;
+            if (IsKuduTruncationMarker(e)) return false;
+            return SensitiveLineRegex.IsMatch(e.Message);
+        }
 
         private static bool IsNoise(WebJobLogEntry e)
         {
-            // SYS INFO siempre es “ruido” para tu UI
+            if (IsKuduTruncationMarker(e))
+                return false;
+
+            if (IsSensitive(e))
+                return true;
+
             if (!string.IsNullOrWhiteSpace(e.Level) &&
                 e.Level.IndexOf("SYS", StringComparison.OrdinalIgnoreCase) >= 0)
                 return true;
@@ -142,7 +176,6 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             if (string.IsNullOrWhiteSpace(e.Message))
                 return true;
 
-            // mensajes de idle / restart
             if (ContainsAny(e.Message, NoisePhrases))
                 return true;
 
@@ -151,32 +184,14 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
 
         private static bool IsCycleBoundary(WebJobLogEntry e)
         {
-            // Un “corte” típico del ciclo: arranque o restart del job.
-            // Ojo: muchos vienen como SYS INFO, por eso miramos message.
-            return ContainsAny(e.Message, new[]
-            {
-                "Run script 'run.cmd'",
-                "Status changed to Running",
-                "Status changed to PendingRestart",
-                "Process went down",
-                "waiting for 60 seconds"
-            });
+            return ContainsAny(e.Message, CycleBoundaryPhrases);
         }
 
-        /// <summary>
-        /// ✅ FIX: en continuous el runId puede repetirse por múltiples ciclos (idle/restart).
-        /// Esta función devuelve SOLO la última “ventana activa” con mensajes útiles.
-        ///
-        /// - Si lo último que hay son mensajes tipo "Sin Mensajes en Cola.." + SYS INFO, devuelve vacío.
-        /// - Si hay mensajes de negocio, devuelve desde el último “arranque/running” previo a esos mensajes hasta el final,
-        ///   filtrando SYS INFO y ruido.
-        /// </summary>
-        public static List<WebJobLogEntry> KeepOnlyLastActiveWindow(List<WebJobLogEntry> lastRunEntries)
+        public static (bool hasActive, int startIndex, int endIndex) FindLastActiveRange(List<WebJobLogEntry> lastRunEntries)
         {
             if (lastRunEntries == null || lastRunEntries.Count == 0)
-                return new List<WebJobLogEntry>();
+                return (false, 0, -1);
 
-            // 1) Encontrar el último mensaje “útil”
             var lastUsefulIdx = -1;
             for (int i = lastRunEntries.Count - 1; i >= 0; i--)
             {
@@ -187,30 +202,66 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                 }
             }
 
-            // Si no hay nada útil => es el caso “no va / idle”
             if (lastUsefulIdx < 0)
-                return new List<WebJobLogEntry>();
+                return (false, 0, -1);
 
-            // 2) Buscar hacia atrás el último “boundary” (inicio de ciclo) antes del último útil
-            var startIdx = 0;
-            for (int i = lastUsefulIdx; i >= 0; i--)
+            var lastUsefulIndexValue = lastRunEntries[lastUsefulIdx].Index;
+
+            var endIndexValue = lastRunEntries.Max(e => e.Index);
+            for (int i = lastUsefulIdx + 1; i < lastRunEntries.Count; i++)
             {
                 if (IsCycleBoundary(lastRunEntries[i]))
                 {
-                    startIdx = i + 1; // empezar después del boundary
+                    endIndexValue = lastRunEntries[i].Index - 1;
                     break;
                 }
             }
 
-            // 3) Cortar ventana [startIdx..end] y filtrar ruido
-            var window = lastRunEntries
-                .Skip(startIdx)
-                .Where(e => !IsNoise(e))
-                .ToList();
+            var startIndexValue = lastRunEntries.Min(e => e.Index);
+            for (int i = lastUsefulIdx; i >= 0; i--)
+            {
+                if (IsCycleBoundary(lastRunEntries[i]))
+                {
+                    startIndexValue = lastRunEntries[i].Index + 1;
+                    break;
+                }
+            }
 
-            // 4) Validación final: si lo “útil” era en realidad solo “Sin Mensajes...” (ya lo filtramos),
-            // window puede quedar vacío.
-            return window;
+            if (startIndexValue > lastUsefulIndexValue || endIndexValue < lastUsefulIndexValue)
+                return (false, 0, -1);
+
+            return (true, startIndexValue, endIndexValue);
+        }
+
+        public static List<WebJobLogEntry> ExtractRealTrace(
+            List<WebJobLogEntry> entries,
+            int currentStartIndex,
+            int currentEndIndex,
+            bool markCurrent)
+        {
+            if (entries == null || entries.Count == 0)
+                return new List<WebJobLogEntry>();
+
+            var result = new List<WebJobLogEntry>(entries.Count);
+
+            foreach (var e in entries)
+            {
+                if (IsNoise(e))
+                    continue;
+
+                result.Add(new WebJobLogEntry
+                {
+                    Timestamp = e.Timestamp,
+                    RunId = e.RunId,
+                    Level = e.Level,
+                    Message = e.Message,
+                    Raw = e.Raw,
+                    Index = e.Index,
+                    IsCurrentExecution = markCurrent && e.Index >= currentStartIndex && e.Index <= currentEndIndex
+                });
+            }
+
+            return result;
         }
     }
 }

@@ -3,17 +3,15 @@ using System.Text.Json.Serialization;
 
 namespace Api.Web.Dynamics365.Models.Kudu
 {
-    // Continuous: GET /api/continuouswebjobs/{name}
     public class KuduContinuousJobDto
     {
         [JsonPropertyName("name")]
         public string? Name { get; set; }
 
         [JsonPropertyName("status")]
-        public string? Status { get; set; }   // Running, Stopped, etc. (texto)
+        public string? Status { get; set; }
     }
 
-    // Triggered: GET /api/triggeredwebjobs/{name} (incluye latest_run)
     public class KuduTriggeredJobDto
     {
         [JsonPropertyName("name")]
@@ -29,7 +27,7 @@ namespace Api.Web.Dynamics365.Models.Kudu
         public string? Id { get; set; }
 
         [JsonPropertyName("status")]
-        public string? Status { get; set; }   // Running | Success | Failed ...
+        public string? Status { get; set; }
 
         [JsonPropertyName("start_time")]
         public DateTime? StartTimeUtc { get; set; }
