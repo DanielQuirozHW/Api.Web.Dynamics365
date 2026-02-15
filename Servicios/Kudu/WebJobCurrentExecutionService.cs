@@ -25,8 +25,7 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             PropertyNameCaseInsensitive = true
         };
 
-        // Recorta el payload (pero ahora además filtramos “idle”)
-        private const int MAX_TRACE_ENTRIES = 300;
+        private const int MAX_REAL_TRACE_ENTRIES = 2000;
 
         public WebJobCurrentExecutionService(IKuduHttpClientFactory kudu)
         {
@@ -60,7 +59,6 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             string webJobName,
             string jobType)
         {
-            // 1) Estado “Running/Stopped” desde Kudu
             var statusUrl = _kudu.CombineUrl(cfg.ScmBaseUrl, $"/api/continuouswebjobs/{Uri.EscapeDataString(webJobName)}");
 
             var statusResp = await SafeGet(client, statusUrl);
@@ -70,77 +68,50 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             var status = jobDto?.Status ?? "Unknown";
             var kudusaysRunning = status.Equals("Running", StringComparison.OrdinalIgnoreCase);
 
-            // Si Kudu no lo marca running, mínimo y listo
-            if (!kudusaysRunning)
-            {
-                return (true, new WebJobCurrentExecutionResponse
-                {
-                    AppService = appService,
-                    WebJobName = webJobName,
-                    JobType = jobType,
-                    IsRunningNow = false,
-                    Status = status,
-                    ExecutionId = null,
-                    StartTimeUtc = null,
-                    EndTimeUtc = null,
-                    TruncatedByKudu = false,
-                    Entries = new System.Collections.Generic.List<WebJobLogEntry>()
-                }, 200, null);
-            }
-
-            // 2) Kudu dice “Running”, pero para vos “Running real” depende de que haya ejecución con log “útil”
-            // Leemos job_log y recortamos SOLO a la ventana activa.
             var logUrl = _kudu.CombineUrl(cfg.ScmBaseUrl,
                 $"/api/vfs/data/jobs/continuous/{Uri.EscapeDataString(webJobName)}/job_log.txt");
 
             var logResp = await SafeGet(client, logUrl);
             if (!logResp.ok) return logResp.fail;
 
-            var sanitized = WebJobLogSanitizer.Sanitize(logResp.body);
-            var parsed = WebJobLogParser.Parse(sanitized);
+            var rawText = logResp.body ?? "";
 
-            // “último runId”, pero ojo: runId puede mantenerse aunque reinicie
-            var onlyLastRunId = WebJobLogParser.KeepOnlyLastRun(parsed);
+            var truncated = WebJobLogParser.DetectTruncatedByKudu(rawText);
 
-            // ✅ acá está la corrección: quedate SOLO con la última ejecución “real” en progreso
-            var activeWindow = WebJobLogParser.KeepOnlyLastActiveWindow(onlyLastRunId);
+            var parsed = WebJobLogParser.Parse(rawText);
 
-            // Si no hay mensajes “reales”, entonces NO está corriendo “de verdad” (está en idle / sin mensajes)
-            if (activeWindow.Count == 0)
-            {
-                return (true, new WebJobCurrentExecutionResponse
-                {
-                    AppService = appService,
-                    WebJobName = webJobName,
-                    JobType = jobType,
-                    IsRunningNow = false,
-                    Status = status, // Kudu puede decir Running, pero no hay ejecución útil
-                    ExecutionId = null,
-                    StartTimeUtc = null,
-                    EndTimeUtc = null,
-                    TruncatedByKudu = WebJobLogParser.DetectTruncatedByKudu(sanitized),
-                    Entries = new System.Collections.Generic.List<WebJobLogEntry>()
-                }, 200, null);
-            }
+            var lastRun = WebJobLogParser.KeepOnlyLastRun(parsed);
 
-            // recorte final por seguridad
-            var trimmed = WebJobLogParser.TakeLast(activeWindow, MAX_TRACE_ENTRIES);
+            var activeRange = WebJobLogParser.FindLastActiveRange(lastRun);
+            var hasActive = kudusaysRunning && activeRange.hasActive;
 
-            var executionId = trimmed.LastOrDefault(e => !string.IsNullOrWhiteSpace(e.RunId))?.RunId;
-            var startTs = trimmed.FirstOrDefault(e => e.Timestamp.HasValue)?.Timestamp;
+            var real = WebJobLogParser.ExtractRealTrace(lastRun, activeRange.startIndex, activeRange.endIndex, hasActive);
+
+            if (real.Count > MAX_REAL_TRACE_ENTRIES)
+                real = real.Skip(real.Count - MAX_REAL_TRACE_ENTRIES).ToList();
+
+            var execId = hasActive
+                ? lastRun.LastOrDefault(e =>
+                    e.Index >= activeRange.startIndex &&
+                    e.Index <= activeRange.endIndex &&
+                    !string.IsNullOrWhiteSpace(e.RunId))?.RunId
+                : null;
+
+            var startTs = hasActive
+                ? real.FirstOrDefault(e => e.IsCurrentExecution && e.Timestamp.HasValue)?.Timestamp
+                : null;
 
             return (true, new WebJobCurrentExecutionResponse
             {
                 AppService = appService,
                 WebJobName = webJobName,
                 JobType = jobType,
-                IsRunningNow = true,
+                IsRunningNow = hasActive,
                 Status = status,
-                ExecutionId = executionId,
+                ExecutionId = execId,
                 StartTimeUtc = startTs,
-                EndTimeUtc = null,
-                TruncatedByKudu = WebJobLogParser.DetectTruncatedByKudu(sanitized),
-                Entries = trimmed
+                TruncatedByKudu = truncated,
+                Entries = real
             }, 200, null);
         }
 
@@ -161,23 +132,6 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
 
             var status = run?.Status ?? "Unknown";
             var isRunning = status.Equals("Running", StringComparison.OrdinalIgnoreCase);
-
-            if (!isRunning)
-            {
-                return (true, new WebJobCurrentExecutionResponse
-                {
-                    AppService = appService,
-                    WebJobName = webJobName,
-                    JobType = jobType,
-                    IsRunningNow = false,
-                    Status = status,
-                    ExecutionId = run?.Id,
-                    StartTimeUtc = run?.StartTimeUtc,
-                    EndTimeUtc = run?.EndTimeUtc,
-                    TruncatedByKudu = false,
-                    Entries = new System.Collections.Generic.List<WebJobLogEntry>()
-                }, 200, null);
-            }
 
             var outputUrl = _kudu.CombineUrl(cfg.ScmBaseUrl, run?.OutputUrl ?? "");
             var errorUrl = _kudu.CombineUrl(cfg.ScmBaseUrl, run?.ErrorUrl ?? "");
@@ -200,26 +154,30 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                 ? outputText
                 : (outputText + "\n\n=== STDERR/ERROR ===\n" + errorText);
 
-            var sanitized = WebJobLogSanitizer.Sanitize(merged);
-            var parsed = WebJobLogParser.Parse(sanitized);
+            var rawText = merged ?? "";
+            var truncated = WebJobLogParser.DetectTruncatedByKudu(rawText);
 
-            // Para triggered no hace falta “ventana” por runId, ya viene por output_url/error_url.
-            var trimmed = WebJobLogParser.TakeLast(parsed, MAX_TRACE_ENTRIES);
+            var parsed = WebJobLogParser.Parse(rawText);
 
-            var start = run?.StartTimeUtc ?? trimmed.FirstOrDefault(e => e.Timestamp.HasValue)?.Timestamp;
+            var range = (startIndex: 0, endIndex: parsed.Count > 0 ? parsed.Max(e => e.Index) : -1);
+            var real = WebJobLogParser.ExtractRealTrace(parsed, range.startIndex, range.endIndex, isRunning);
+
+            if (real.Count > MAX_REAL_TRACE_ENTRIES)
+                real = real.Skip(real.Count - MAX_REAL_TRACE_ENTRIES).ToList();
+
+            var start = run?.StartTimeUtc ?? real.FirstOrDefault(e => e.Timestamp.HasValue)?.Timestamp;
 
             return (true, new WebJobCurrentExecutionResponse
             {
                 AppService = appService,
                 WebJobName = webJobName,
                 JobType = jobType,
-                IsRunningNow = true,
+                IsRunningNow = isRunning,
                 Status = status,
                 ExecutionId = run?.Id,
                 StartTimeUtc = start,
-                EndTimeUtc = run?.EndTimeUtc,
-                TruncatedByKudu = WebJobLogParser.DetectTruncatedByKudu(sanitized),
-                Entries = trimmed
+                TruncatedByKudu = truncated,
+                Entries = real
             }, 200, null);
         }
 

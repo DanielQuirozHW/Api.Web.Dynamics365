@@ -64,7 +64,6 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
             if (string.IsNullOrWhiteSpace(relativeOrAbsolute))
                 return baseUrl;
 
-            // si ya viene absoluto (ej output_url de triggered), lo devolvemos tal cual
             if (relativeOrAbsolute.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 relativeOrAbsolute.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 return relativeOrAbsolute;

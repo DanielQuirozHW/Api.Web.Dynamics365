@@ -1,4 +1,6 @@
-﻿namespace Api.Web.Dynamics365.Models.Kudu
+﻿using System.Collections.Generic;
+
+namespace Api.Web.Dynamics365.Models.Kudu
 {
     public class KuduOptions : Dictionary<string, KuduConfig>
     {

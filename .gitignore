@@ -64,6 +64,8 @@ TestResults/
 .DS_Store
 Thumbs.db
 
+Properties/
+
 # App settings (contains secrets)
 appsettings.json
 appsettings.Development.json
