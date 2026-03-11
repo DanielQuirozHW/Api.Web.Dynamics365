@@ -75,10 +75,16 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
 
                     DateTime? ts = null;
                     var tsStr = m.Groups["ts"].Value;
-                    if (DateTime.TryParseExact(tsStr, "MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture,
-                        DateTimeStyles.AssumeLocal, out var parsed))
+
+                    if (DateTime.TryParseExact(
+                        tsStr,
+                        "MM/dd/yyyy HH:mm:ss",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None,
+                        out var parsed))
                     {
-                        ts = parsed;
+                        // El timestamp del header de Kudu se interpreta como UTC
+                        ts = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
                     }
 
                     current = new WebJobLogEntry
@@ -132,10 +138,14 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                 .ToList();
         }
 
-        public static bool DetectTruncatedByKudu(string rawText)
+        public static bool DetectTruncatedByKudu(List<WebJobLogEntry> entries)
         {
-            return (rawText ?? "")
-                .IndexOf(KUDU_TRUNC_MARKER, StringComparison.OrdinalIgnoreCase) >= 0;
+            if (entries == null || entries.Count == 0)
+                return false;
+
+            return entries.Any(e =>
+                !string.IsNullOrWhiteSpace(e.Message) &&
+                e.Message.IndexOf(KUDU_TRUNC_MARKER, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private static bool ContainsAny(string? text, IEnumerable<string> phrases)

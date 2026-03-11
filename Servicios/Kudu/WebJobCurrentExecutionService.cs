@@ -76,11 +76,11 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
 
             var rawText = logResp.body ?? "";
 
-            var truncated = WebJobLogParser.DetectTruncatedByKudu(rawText);
-
             var parsed = WebJobLogParser.Parse(rawText);
 
             var lastRun = WebJobLogParser.KeepOnlyLastRun(parsed);
+
+            var truncated = WebJobLogParser.DetectTruncatedByKudu(lastRun);
 
             var activeRange = WebJobLogParser.FindLastActiveRange(lastRun);
             var hasActive = kudusaysRunning && activeRange.hasActive;
@@ -155,9 +155,8 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                 : (outputText + "\n\n=== STDERR/ERROR ===\n" + errorText);
 
             var rawText = merged ?? "";
-            var truncated = WebJobLogParser.DetectTruncatedByKudu(rawText);
-
             var parsed = WebJobLogParser.Parse(rawText);
+            var truncated = WebJobLogParser.DetectTruncatedByKudu(parsed);
 
             var range = (startIndex: 0, endIndex: parsed.Count > 0 ? parsed.Max(e => e.Index) : -1);
             var real = WebJobLogParser.ExtractRealTrace(parsed, range.startIndex, range.endIndex, isRunning);
