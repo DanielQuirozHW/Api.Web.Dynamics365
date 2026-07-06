@@ -87,13 +87,30 @@ namespace Api.Web.Dynamics365.Servicios.Kudu
                         ts = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
                     }
 
+                    var level = (m.Groups["lvl"].Value ?? "UNKNOWN").Trim();
+                    var message = m.Groups["msg"].Value ?? "";
+
+                    if (level.Equals("INFO", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (message.StartsWith("****"))
+                        {
+                            level = "ERROR";
+                            message = message.Substring(4).TrimStart('-', '>', ' ');
+                        }
+                        else if (message.StartsWith("####"))
+                        {
+                            level = "WARNING";
+                            message = message.Substring(4).TrimStart('-', '>', ' ');
+                        }
+                    }
+
                     current = new WebJobLogEntry
                     {
                         Index = idx++,
                         Timestamp = ts,
                         RunId = m.Groups["run"].Value,
-                        Level = (m.Groups["lvl"].Value ?? "UNKNOWN").Trim(),
-                        Message = m.Groups["msg"].Value ?? "",
+                        Level = level,
+                        Message = message,
                         Raw = line,
                         IsCurrentExecution = false
                     };
